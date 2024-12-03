@@ -327,6 +327,10 @@ test.data = testing(accident.split)
 train.data
 ```
 
+```{r}
+levels(train.data$Outcome)
+```
+
 ## Look at the training data
 
 The outcome variable is imbalanced as majority of crashes do not require hospital transport.
@@ -345,8 +349,23 @@ prop.table(table(train.data$Outcome))
 ```{r}
 train.balanced = ovun.sample(Outcome ~ ., data=train.data, method="both")$data
 
-prop.table(table(train.balanced$Outcome))
+prop.table(table(train.bal$Outcome))
 ```
+
+
+```{r}
+levels(train.balanced$Outcome)
+```
+```{r}
+train.balanced = train.balanced %>%
+  mutate(Outcome = factor(train.balanced$Outcome, levels=c("Transported to Hospital", "No Hospital Transport")))
+```
+
+
+```{r}
+levels(train.balanced$Outcome)
+```
+
 ```{r}
 ggplot(train.balanced) +
   aes(x=Outcome) +
@@ -366,7 +385,6 @@ nrow(train.balanced)
 #### RF: Fit the model to the train data
 ```{r}
 rf.model = rand_forest(mode="classification") %>%
-  set_engine("ranger", importance="impurity") %>%
   fit(Outcome ~ ., data=train.balanced)
 ```
 
@@ -685,9 +703,35 @@ xgb.test.data = test.data %>%
 sba_metrics(xgb.test.data, truth=Outcome, estimate=.pred_class)
 ```
 
+
+# Plot the feature importance
+```{r}
+feature_importance = xgb.importance(model = xgb.model)
+```
+
+
+
+# Visualize feature importance
+```{r}
+xgb.plot.importance(importance_matrix = feature_importance)
+```
+
+```{r}
+# Confusion Matrix
+ 
+xgb.test.results = xgb.test.data %>%
+  select(Outcome, .pred_class)
+ 
+# Explicitly set the levels to make "Transported to Hospital" the positive class
+xgb.test.results$Outcome = factor(xgb.test.results$Outcome, 
+                                 levels = c("No Hospital Transport", "Transported to Hospital"))
+xgb.test.results$.pred_class = factor(xgb.test.results$.pred_class, 
+                                     levels = c("No Hospital Transport", "Transported to Hospital"))
+ 
 # Create confusion matrix with "Transported to Hospital" as positive class
 conf_mat = confusionMatrix(xgb.test.results$.pred_class, 
-                          xgb.test.results$Outcome)
+                          xgb.test.results$Outcome,
+                          positive = "Transported to Hospital")
 print(conf_mat)
 ```
 
