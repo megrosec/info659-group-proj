@@ -32,6 +32,7 @@ library(tidymodels)
 library(discrim)
 library(ranger)
 library(ROSE)
+library(caret)
 ```
 
 ## Set the seed
@@ -297,8 +298,11 @@ accident.join = accident.join %>%
   mutate(month_name = as.factor(month_name)) %>%
   mutate(light_condition = as.factor(light_condition)) %>%
   mutate(weather_name = as.factor(weather_name))
+
+accident.join.set.pos.class = accident.join %>%
+  mutate(Outcome = factor(accident.join$Outcome, levels=c("Transported to Hospital", "No Hospital Transport")))
   
-accident.join.filtered = accident.join %>%
+accident.join.filtered = accident.join.set.pos.class %>%
   select(AGE_OF_PERSON, SEX_OF_PERSON, PERSON_INVOLVED_TYPE, AIRBAG_DEPLOYMENT,
          PERSON_EJECTED, ROLLOVER_OCCURENCE, FIRE_RELATED_CRASH, region_name, 
          urbancity_name, hour, month_name, light_condition, weather_name, Outcome)
@@ -306,6 +310,9 @@ accident.join.filtered = accident.join %>%
 accident.join.filtered
 ```
 
+```{r}
+levels(accident.join.filtered$Outcome)
+```
 
 
 ## Split the data
@@ -341,6 +348,12 @@ train.balanced = ovun.sample(Outcome ~ ., data=train.data, method="both")$data
 prop.table(table(train.balanced$Outcome))
 ```
 ```{r}
+ggplot(train.balanced) +
+  aes(x=Outcome) +
+  geom_bar() 
+```
+
+```{r}
 nrow(train.balanced)
 ```
 
@@ -353,6 +366,7 @@ nrow(train.balanced)
 #### RF: Fit the model to the train data
 ```{r}
 rf.model = rand_forest(mode="classification") %>%
+  set_engine("ranger", importance="impurity") %>%
   fit(Outcome ~ ., data=train.balanced)
 ```
 
@@ -393,7 +407,7 @@ sba_metrics(xgb.valid.data, truth=Outcome, estimate=.pred_class)
 
 #### RF: Tune tree size:
 ```{r}
-tree_sizes = c(10, 50, 75, 100, 200, 300, 500, 700, 900, 1000, 1200)
+tree_sizes = c(10, 50, 75, 100, 200, 300, 500)
 tree_metrics = map_df(tree_sizes, function(n) {
   preds = rand_forest(mode="classification", trees=n) %>%
     fit(Outcome ~ ., data=train.balanced) %>%
@@ -427,7 +441,7 @@ rf.trees
 I used ChatGPT to identify how to test for mtry values - maximum is the number of features (ChatGPT-2, 2024)
 
 ```{r}
-mtry_sizes = c(1,2,3,4,5,6,7,8)
+mtry_sizes = c(1,2,3,4,5,6,7,8,9,10,11,12,13)
 mtry_metrics = map_df(mtry_sizes, function(n) {
   preds = rand_forest(mode="classification", trees=rf.trees, mtry=n) %>%
     fit(Outcome ~ ., data=train.balanced) %>%
@@ -590,7 +604,8 @@ xgb.tree.depth
 
 #### XGB: Re-fit the train data with optimum values
 ```{r}
-xgb.model = boost_tree(mode="classification", trees=xgb.trees, mtry=xgb.mtry, tree_depth = xgb.tree.depth) %>%
+xgb.model = boost_tree(mode="classification", 
+                       trees=xgb.trees, mtry=xgb.mtry, tree_depth = xgb.tree.depth) %>%
   fit(Outcome ~ ., data=train.balanced)
 ```
 
@@ -670,6 +685,13 @@ xgb.test.data = test.data %>%
 sba_metrics(xgb.test.data, truth=Outcome, estimate=.pred_class)
 ```
 
+# Create confusion matrix with "Transported to Hospital" as positive class
+conf_mat = confusionMatrix(xgb.test.results$.pred_class, 
+                          xgb.test.results$Outcome)
+print(conf_mat)
+```
 
-## Outcomes - Charts/Results
+
+
+## Outcomes
 
