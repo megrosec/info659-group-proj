@@ -1,0 +1,715 @@
+---
+title: "INFO-659_Final_Project_Accident_Report_Data"
+author: "Rafi Ahmad, Naishal Chauhan, Megan Cunningham, and Jinsu Mathew"
+date: "2024-11-02"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    theme: readable
+---
+
+
+# Analysis of Crash Report Sampling System (CRSS) 2022 Accident Data 
+
+Data Source: National Highway Traffic Safety Administration’s (NHTSA) Crash Reporting Sampling System (CRSS) 2022 Data: https://www.nhtsa.gov/file-downloads?p=nhtsa/downloads/CRSS/2022/ 
+
+Problem: Motor vehicle crashes cause injuries and deaths that costs billions in emergency services yearly. Developing a predictive model to improve/optimize emergency response times could lead to cost savings and improve injury outcomes.
+
+## Goals of Project
+1. Identify key factors contributing to high-severity accidents.
+2. Develop a predictive model to determine whether a crash will require a hospital transport.
+
+## Preliminaries
+
+### Load R packages:
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(dplyr)
+library(readr)
+library(caret)
+library(xgboost)
+library(tidymodels)
+library(discrim)
+library(ranger)
+library(ROSE)
+library(caret)
+```
+
+### Set the seed
+```{r}
+set.seed(20241128)
+```
+
+### Specifying Metrics
+
+Setting the metrics we want to calculate: accuracy, precision, sensitivity, specificity, and Cohen's Kappa.
+
+```{r}
+sba_metrics = metric_set(accuracy, precision, sensitivity, specificity, kap)
+```
+
+
+## Load the Data
+
+### Load Accident Data
+We selected data from 2 data sets: accident.csv and person.csv.
+```{r}
+accident.data.raw = read_csv("data_files/CRSS2022CSV/accident.csv")
+
+accident.data.raw
+```
+
+### Cleanse the accident data
+```{r}
+accident.data = accident.data.raw %>%
+  mutate(NUM_INJ = ifelse(NUM_INJ>97, NA, NUM_INJ))
+
+accident.data
+```
+
+```{r}
+# Replace missing values in categorical columns with "Unknown"
+accident_data = accident.data.raw %>%
+  mutate_if(is.character, ~replace(., is.na(.), "Unknown"))
+
+# Replace missing values in numeric columns with the median
+accident_data = accident_data %>%
+  mutate_if(is.numeric, ~replace(., is.na(.), median(., na.rm = TRUE)))
+
+
+```
+
+
+
+Introducing the variables: 
+
+1. CASENUM: Case number
+
+2. REGIONNAME : Geographic region's name
+
+3. URBANICITYNAME : Describes the level of urbanicity (urban or rural areas)
+
+4. HOUR_IM: represent the hour of the incident
+
+5. RELJCT2_IMNAME : Describes the relation to the junction for the second incident or vehicle (e.g., “At Intersection”)
+
+6. LGTCON_IMNAME: Describes light conditions
+
+7. WEATHR_IMNAME: Describes weather conditions 
+
+8. MAXSEV_IM: Code indicating the maximum severity level of the incident
+
+9. MAXSEV_IMNAME: Descriptive name for MAXSEV_IM
+
+10. NO_INJ_IM : Represents the number of injuries 
+
+12. MONTHNAME: Month of the incident 
+
+```{r}
+cleaned_data = accident_data %>%
+  select(CASENUM, REGIONNAME, URBANICITYNAME, MONTHNAME, HOUR_IM, RELJCT2_IMNAME, LGTCON_IMNAME, WEATHR_IMNAME, MAXSEV_IM, MAXSEV_IMNAME, NO_INJ_IM, ALCHL_IMNAME)
+```
+
+```{r}
+# Rename columns for clarity
+renamed_accident_data = cleaned_data %>%
+  rename(
+    case_number = CASENUM,
+    region_name = REGIONNAME, 
+    urbancity_name = URBANICITYNAME, 
+    month_name = MONTHNAME,
+    hour = HOUR_IM, 
+    junction_name = RELJCT2_IMNAME, 
+    light_condition = LGTCON_IMNAME, 
+    weather_name = WEATHR_IMNAME, 
+    max_severity_level = MAXSEV_IM, 
+    max_severity_des = MAXSEV_IMNAME, 
+    injur_no = NO_INJ_IM,
+    alcohol_involved = ALCHL_IMNAME
+  )
+renamed_accident_data
+```
+
+Removing any duplicates 
+```{r}
+renamed_accident_data =  renamed_accident_data %>% distinct()
+renamed_accident_data
+```
+Truncating Region Names
+```{r}
+accident.data = renamed_accident_data %>%
+  mutate(region_name = str_split(region_name, "\\(", simplify = T)[,1])
+
+accident.data
+```
+
+
+### Load Person Data
+
+The person data file includes list of individuals involved in an accident and various factors including - age, sex, their involvement in the accident (driver, passenger, etc.), whether they were injuried and the severity of their injuries, and if they were transported to a hospital.
+```{r}
+person.data.raw = read_csv("data_files/CRSS2022CSV/person.csv")
+
+person.data.raw
+```
+
+
+
+
+### Cleanse Person Data
+
+```{r}
+# Replace missing values in categorical columns with "Unknown"
+person.data.na.filter = person.data.raw %>%
+  mutate_if(is.character, ~replace(., is.na(.), "Unknown"))
+
+# Replace missing values in numeric columns with the median
+person.data.na.filter = person.data.na.filter %>%
+  mutate_if(is.numeric, ~replace(., is.na(.), median(., na.rm = TRUE)))
+
+person.data.na.filter
+```
+
+
+Select the variables we want and use code-book (https://crashstats.nhtsa.dot.gov/Api/Public/ViewPublication/813545) to reduce categories to simplify data analysis:
+- Unique identifies for joins: CASENUM and PER_NO
+- Age of person involved: AGE_IM renamed to AGE_OF_PERSON
+- Sex of person involved: SEX_IMNAME renamed to SEX_OF_PERSON
+- Whether the person was the Driver, Passenger, Other - Occupant, or Other - Non-Occupant - PER_TYP/PER_TYPNAME renamed to PERSON_INVOLVED_TYPE.
+- The injury severity - INJSEV_IMNAME renamed to INJURY_SEVERITY - and reduced to: No Known Injury, Injury - Severity Minor or Unknown, Serious Injury, Fatal Injury, or Other - Injury or Fatality not From Crash
+- Whether the person's airbag deployed: AIR_BAGNAME renamed to AIRBAG_DEPLOYMENT
+- Whether the person was transported to the hospital - HOSPITALNAME renamed to HOSPITAL_TRANSPORT_STATUS
+- Whether a rollover occured in the accident - ROLLOVERNAME renamed to ROLLOVER_OCCURENCE
+- Whether a fire was related to the accident - FIRE_EXPNAME renamed to FIRE_RELATED_CRASH
+
+```{r}
+person.data = person.data.na.filter %>%
+  select(CASENUM, PER_NO, AGE_IM, SEX_IMNAME, PER_TYP, PER_TYPNAME, INJSEV_IM, INJSEV_IMNAME, 
+         AIR_BAG, AIR_BAGNAME, EJECT_IM, EJECT_IMNAME, HOSPITAL, HOSPITALNAME, ROLLOVER, ROLLOVERNAME, FIRE_EXP, FIRE_EXPNAME) %>%
+    mutate(PER_TYPNAME=ifelse(person.data.na.filter$PER_TYP == 1, "Driver", 
+                              ifelse(person.data.na.filter$PER_TYP == 2, "Passenger",
+                                     ifelse(person.data.na.filter$PER_TYP == 9 | person.data.na.filter$PER_TYP %in% c(3,4), "Other - Occupant",
+                                     "Other - Non-occupant")))) %>%
+    mutate(INJSEV_IMNAME=ifelse(person.data.na.filter$INJSEV_IM == 0 | person.data.na.filter$INJSEV_IM == 9, "No Known Injury", 
+                              ifelse(person.data.na.filter$INJSEV_IM == 5 | person.data.na.filter$INJSEV_IM %in% c(1,2), "Injury - Severity Minor or Unknown",
+                                     ifelse(person.data.na.filter$INJSEV_IM == 3, "Serious Injury",
+                                            ifelse(person.data.na.filter$INJSEV_IM == 4, "Fatal Injury", "Other - Injury or Fatality not From Crash"))))) %>%
+    mutate(AIR_BAGNAME=ifelse(person.data.na.filter$AIR_BAG %in% c(1,9),
+                              "Deployed", 
+                              ifelse(person.data.na.filter$AIR_BAG == 20 | person.data.na.filter$AIR_BAG == 28,
+                                     "Not Deployed", "Deployment Unknown"))) %>%
+    mutate(EJECT_IMNAME=ifelse(person.data.na.filter$EJECT_IM %in% c(1,3),
+                              "Ejected", 
+                              ifelse(person.data.na.filter$EJECT_IM == 0,
+                                     "Not Ejected", "Ejection Unknown"))) %>%
+    mutate(HOSPITALNAME=ifelse(person.data.na.filter$HOSPITAL == 0,
+                                     "No Hospital Transport",
+                                 ifelse(person.data.na.filter$HOSPITAL %in% c(8,9),
+                                     "Hospital Transport Status Unknown", "Transported to Hospital"))) %>%
+    mutate(ROLLOVERNAME=ifelse(person.data.na.filter$ROLLOVER %in% c(1,3) | person.data.na.filter$ROLLOVER == 9,
+                                     "Rollover Occured", ROLLOVERNAME)) %>%
+    rename("AGE_OF_PERSON" = AGE_IM) %>%
+    rename("PERSON_INVOLVED_TYPE" = PER_TYPNAME) %>%
+    rename("SEX_OF_PERSON" = SEX_IMNAME) %>%
+    rename("INJURY_SEVERITY" = INJSEV_IMNAME) %>%
+    rename("AIRBAG_DEPLOYMENT" = AIR_BAGNAME) %>%
+    rename("PERSON_EJECTED" = EJECT_IMNAME) %>%
+    rename("HOSPITAL_TRANSPORT_STATUS" = HOSPITALNAME) %>%
+    rename("ROLLOVER_OCCURENCE" = ROLLOVERNAME) %>%
+    rename("FIRE_RELATED_CRASH" = FIRE_EXPNAME)
+
+person.data
+```
+
+
+
+## Let's look at some distributions
+
+```{r}
+accident.data
+```
+
+### Number of individuals injured in the crash:
+Summary
+```{r}
+summary(accident.data$injur_no)
+```
+Distribution
+```{r}
+ggplot(accident.data) +
+  aes(x=injur_no, na.rm = TRUE) +
+  geom_histogram(binwidth=1,col="blue", fill="lightblue")+
+  geom_vline(xintercept = mean(accident.data$injur_no, na.rm=TRUE),
+             color='black') +
+  geom_vline(xintercept = median(accident.data$injur_no, na.rm=TRUE),
+             color='red')
+```
+
+Distribution of injury severity:
+```{r}
+ggplot(accident.data, aes(y=max_severity_des)) + 
+  geom_bar(stat="count", na.rm = TRUE)+ 
+  xlab("Count of instances") +
+  ylab("Maximum Severity Incurred Description") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 0.5, vjust = 0.5))
+```
+
+
+## Join the accident and person data using the CaseNum field
+
+
+Joining the data and filtering out where our outcome variable, Hospital Transport, is unknown.
+```{r}
+accident.join = person.data %>%
+  left_join(., accident.data, by=join_by(CASENUM==case_number)) %>%
+  filter(HOSPITAL_TRANSPORT_STATUS != "Hospital Transport Status Unknown")
+
+accident.join
+```
+
+## Create Outcome column and select inputs for outcome related to hospital transport
+
+```{r}
+accident.join = accident.join %>%
+  mutate(Outcome = as.factor(if_else(HOSPITAL_TRANSPORT_STATUS == "Transported to Hospital",
+                                     "Transported to Hospital", "No Hospital Transport"))) %>%
+  mutate(SEX_OF_PERSON = as.factor(SEX_OF_PERSON)) %>%
+  mutate(PERSON_INVOLVED_TYPE = as.factor(PERSON_INVOLVED_TYPE)) %>%
+  mutate(AIRBAG_DEPLOYMENT = as.factor(AIRBAG_DEPLOYMENT)) %>%
+  mutate(PERSON_EJECTED = as.factor(PERSON_EJECTED)) %>%
+  mutate(ROLLOVER_OCCURENCE = as.factor(ROLLOVER_OCCURENCE)) %>%
+  mutate(FIRE_RELATED_CRASH = as.factor(FIRE_RELATED_CRASH)) %>%
+  mutate(region_name = as.factor(region_name)) %>%
+  mutate(urbancity_name = as.factor(urbancity_name)) %>%
+  mutate(month_name = as.factor(month_name)) %>%
+  mutate(light_condition = as.factor(light_condition)) %>%
+  mutate(weather_name = as.factor(weather_name))
+
+accident.join.set.pos.class = accident.join %>%
+  mutate(Outcome = factor(accident.join$Outcome, levels=c("Transported to Hospital", "No Hospital Transport")))
+  
+accident.join.filtered = accident.join.set.pos.class %>%
+  select(AGE_OF_PERSON, SEX_OF_PERSON, PERSON_INVOLVED_TYPE, AIRBAG_DEPLOYMENT,
+         PERSON_EJECTED, ROLLOVER_OCCURENCE, FIRE_RELATED_CRASH, region_name, 
+         urbancity_name, hour, month_name, light_condition, weather_name, Outcome)
+
+accident.join.filtered
+```
+
+Ensuring the positive class is set to "Transported to Hospital"
+```{r}
+levels(accident.join.filtered$Outcome)
+```
+
+
+## Split the data
+
+Split the data to 70% train, 15% validation, and 15% test
+```{r}
+accident.split = initial_validation_split(accident.join.filtered, prop = c(0.7, 0.15))
+train.data = training(accident.split)
+valid.data = validation(accident.split)
+test.data = testing(accident.split)
+
+train.data
+```
+Ensuring the positive class is set to "Transported to Hospital" in the training data
+```{r}
+levels(train.data$Outcome)
+```
+
+## Look at the training data
+
+The outcome variable is imbalanced as majority of crashes do not require hospital transport.
+```{r}
+ggplot(train.data) +
+  aes(x=Outcome) +
+  geom_bar() 
+```
+
+```{r}
+prop.table(table(train.data$Outcome))
+```
+
+## Oversample Transported to Hospital to reduce class and Undersample Not Transported to address class imbalances in training data
+Due to severe class imbalance, we decided to resample the training data to ensure fewer false negatives.
+```{r}
+train.balanced = ovun.sample(Outcome ~ ., data=train.data, method="both")$data
+
+prop.table(table(train.balanced$Outcome))
+```
+
+Checking positive variable in Outcome - seems to have switched.
+```{r}
+levels(train.balanced$Outcome)
+```
+
+Reset positive variable
+```{r}
+train.balanced = train.balanced %>%
+  mutate(Outcome = factor(train.balanced$Outcome, levels=c("Transported to Hospital", "No Hospital Transport")))
+```
+
+
+```{r}
+levels(train.balanced$Outcome)
+```
+
+Check distribution post re-sampling
+```{r}
+ggplot(train.balanced) +
+  aes(x=Outcome) +
+  geom_bar() 
+```
+
+Number of training rows
+```{r}
+nrow(train.balanced)
+```
+
+
+## Train the data
+We selected 2 decision tree models: Random Forest (RF) and Gradient-boosted (XGB) to train the data and compare the metrics.
+
+### 1. Random Forest (RF)
+
+#### RF: Fit the model to the train data
+```{r}
+rf.model = rand_forest(mode="classification") %>%
+  fit(Outcome ~ ., data=train.balanced)
+```
+
+#### RF: Evaluation with the validation data:
+
+```{r}
+rf.valid.data = na.omit(valid.data) %>%
+  bind_cols(predict(rf.model, na.omit(valid.data))) %>%
+  glimpse()
+```
+
+#### RF: Apply the metrics:
+
+```{r}
+sba_metrics(rf.valid.data, truth=Outcome, estimate=.pred_class)
+```
+### XGB
+
+#### XGB: Fit the model to the training data
+```{r}
+xgb.model = boost_tree(mode="classification") %>%
+  fit(Outcome ~ ., data=train.balanced)
+```
+#### XGB: Evaluation with the validation data:
+
+```{r}
+xgb.valid.data = valid.data %>%
+  bind_cols(predict(xgb.model, valid.data)) %>%
+  glimpse()
+```
+
+#### XGB: Apply the metrics:
+
+```{r}
+sba_metrics(xgb.valid.data, truth=Outcome, estimate=.pred_class)
+```
+### Tune Random Forest - Tree Size and MTRY (number of variables in each tree)
+
+#### RF: Tune tree size:
+```{r}
+tree_sizes = c(10, 50, 75, 100, 200, 300, 500)
+tree_metrics = map_df(tree_sizes, function(n) {
+  preds = rand_forest(mode="classification", trees=n) %>%
+    fit(Outcome ~ ., data=train.balanced) %>%
+    predict(valid.data)
+  results = valid.data %>%
+    select(Outcome) %>%
+    bind_cols(preds)
+  sba_metrics(results, truth = Outcome, estimate = .pred_class) %>%
+    mutate(trees=n)
+})
+```
+
+We can plot:
+
+```{r}
+ggplot(tree_metrics %>% filter(.metric == "kap")) +
+  aes(x=trees, y=.estimate) +
+  geom_line() +
+  xlab("Number of Trees") +
+  ylab("Cohen's kappa")
+```
+
+Pick the number of trees with the highest Cohen's Kappa value.
+```{r}
+rf.trees = tree_metrics %>% filter(.metric == "kap") %>%
+  slice_max(.estimate, n=1) %>%
+  pull(trees)
+rf.trees
+```
+#### RF: Tune number of variables in each tree (mtry):
+
+```{r}
+mtry_sizes = c(1,2,3,4,5,6,7,8,9,10,11,12,13)
+mtry_metrics = map_df(mtry_sizes, function(n) {
+  preds = rand_forest(mode="classification", trees=rf.trees, mtry=n) %>%
+    fit(Outcome ~ ., data=train.balanced) %>%
+    predict(valid.data)
+  results = valid.data %>%
+    select(Outcome) %>%
+    bind_cols(preds)
+  sba_metrics(results, truth = Outcome, estimate = .pred_class) %>%
+    mutate(mtry=n)
+})
+```
+
+
+Plot the different sizes against Cohen's Kappa:
+```{r}
+ggplot(mtry_metrics %>% filter(.metric == "kap")) +
+  aes(x=mtry, y=.estimate) +
+  geom_line() +
+  xlab("Number of Features (mtry)") +
+  ylab("Cohen's kappa")
+```
+
+Select the mtry value that produces the highest Cohen's Kappa:
+```{r}
+rf.mtry = mtry_metrics %>% filter(.metric == "kap") %>%
+  slice_max(.estimate, n=1) %>%
+  pull(mtry)
+rf.mtry
+```
+
+#### RF: Re-fit the training data with the optimized hyperparameters:
+```{r}
+rf.model = rand_forest(mode="classification", trees = rf.trees, mtry=rf.mtry) %>%
+  fit(Outcome ~ ., data=train.balanced)
+```
+
+#### RF: Re-evaluate with validation data:
+```{r}
+rf.valid.data = na.omit(valid.data) %>%
+  bind_cols(predict(rf.model, na.omit(valid.data)))
+```
+
+#### RF: Re-apply the metrics:
+
+```{r}
+sba_metrics(rf.valid.data, truth=Outcome, estimate=.pred_class)
+```
+
+
+### Tune XGB - tree size, mtry, and tree depth
+
+#### XGB - Tune tree size
+```{r}
+tree_sizes = c(10, 50, 75, 100, 200, 300, 500)
+tree_metrics = map_df(tree_sizes, function(n) {
+  preds = boost_tree(mode="classification", trees=n) %>%
+    fit(Outcome ~ ., data=train.balanced) %>%
+    predict(valid.data)
+  results = valid.data %>%
+    select(Outcome) %>%
+    bind_cols(preds)
+  sba_metrics(results, truth = Outcome, estimate = .pred_class) %>%
+    mutate(trees=n)
+})
+```
+
+We can plot:
+
+```{r}
+ggplot(tree_metrics %>% filter(.metric == "kap")) +
+  aes(x=trees, y=.estimate) +
+  geom_line() +
+  xlab("Number of Trees") +
+  ylab("Cohen's kappa")
+```
+Let's automatically pick the best tree size.
+
+```{r}
+xgb.trees = tree_metrics %>% filter(.metric == "kap") %>%
+  slice_max(.estimate, n=1, with_ties=FALSE) %>%
+  pull(trees)
+xgb.trees
+```
+
+
+#### XGB: Tune number of variables in each tree (mtry)
+```{r}
+mtry_sizes = c(1,2,3,4,5,6,7,8,9,10,11,12,13)
+mtry_metrics = map_df(mtry_sizes, function(n) {
+  preds = boost_tree(mode="classification", trees=xgb.trees, mtry=n) %>%
+    fit(Outcome ~ ., data=train.balanced) %>%
+    predict(valid.data)
+  results = valid.data %>%
+    select(Outcome) %>%
+    bind_cols(preds)
+  sba_metrics(results, truth = Outcome, estimate = .pred_class) %>%
+    mutate(mtry=n)
+})
+
+```
+
+Plot the values against the Cohen's Kappa value:
+
+```{r}
+ggplot(mtry_metrics %>% filter(.metric == "kap")) +
+  aes(x=mtry, y=.estimate) +
+  geom_line() +
+  xlab("Number of Features (mtry)") +
+  ylab("Cohen's kappa")
+```
+
+Pick the optimum mtry value:
+
+```{r}
+xgb.mtry = mtry_metrics %>% filter(.metric == "kap") %>%
+  slice_max(.estimate, n=1) %>%
+  pull(mtry)
+xgb.mtry
+```
+
+
+
+#### XGB: Tune the maximum tree depth
+
+```{r}
+tree.depth.sizes = c(3,4,5,6,7,8,9,10,11)
+tree.depth.metrics = map_df(tree.depth.sizes, function(n) {
+  preds = boost_tree(mode="classification", trees=xgb.trees, mtry=xgb.mtry, tree_depth=n) %>%
+    fit(Outcome ~ ., data=train.balanced) %>%
+    predict(valid.data)
+  results = valid.data %>%
+    select(Outcome) %>%
+    bind_cols(preds)
+  sba_metrics(results, truth = Outcome, estimate = .pred_class) %>%
+    mutate(tree_depth=n)
+})
+```
+
+Plot the tree depths against the Cohen's Kappa:
+```{r}
+ggplot(tree.depth.metrics %>% filter(.metric == "kap")) +
+  aes(x=tree_depth, y=.estimate) +
+  geom_line() +
+  xlab("Tree Depth") +
+  ylab("Cohen's kappa")
+```
+
+
+
+Select the best maximum tree depth value:
+```{r}
+xgb.tree.depth = tree.depth.metrics %>% filter(.metric == "kap") %>%
+  slice_max(.estimate, n=1) %>%
+  pull(tree_depth)
+xgb.tree.depth
+```
+
+
+#### XGB: Re-fit the train data with optimum values
+```{r}
+xgb.model = boost_tree(mode="classification", 
+                       trees=xgb.trees, mtry=xgb.mtry, tree_depth = xgb.tree.depth) %>%
+  fit(Outcome ~ ., data=train.balanced)
+```
+
+#### XGB: Re-evaluate against the validation data
+```{r}
+xgb.valid.data = valid.data %>%
+  bind_cols(predict(xgb.model, valid.data))
+```
+
+#### XGB: Apply the metrics
+```{r}
+sba_metrics(xgb.valid.data, truth=Outcome, estimate=.pred_class)
+```
+
+
+## Evaluate Model Metrics/Create Charts
+Compare each model, and the models with tuned hyperparameters, by fitting the training data and validation data.
+We will use this to select the preferred model to evaluate our test data with.
+
+```{r}
+all.test.preds = bind_rows(
+  RF = rand_forest(mode="classification") %>%
+    fit(Outcome ~ ., train.balanced) %>%
+    predict(valid.data) %>% bind_cols(valid.data),
+  XGB = boost_tree(mode="classification") %>%
+    fit(Outcome ~ ., train.balanced) %>%
+    predict(valid.data) %>% bind_cols(valid.data),
+  RF_OPT = rand_forest(mode="classification", trees=rf.trees, mtry=rf.mtry) %>%
+    fit(Outcome ~ ., train.balanced) %>%
+    predict(valid.data) %>% bind_cols(valid.data),
+  XGB_OPT = boost_tree(mode="classification", trees=xgb.trees, mtry=xgb.mtry, tree_depth = xgb.tree.depth) %>%
+    fit(Outcome ~ ., train.balanced) %>%
+    predict(valid.data) %>% bind_cols(valid.data),
+  .id="Model"
+)
+```
+
+### Calculate the metrics
+
+#### Default Params
+
+```{r}
+all.metrics = all.test.preds %>%
+  group_by(Model) %>%
+  sba_metrics(truth=Outcome, estimate=.pred_class)
+```
+
+```{r}
+all.metrics %>%
+  pivot_wider(id_cols=Model, names_from=.metric, values_from = .estimate)
+```
+
+Plot the metrics - XBG has superior sensitivity, will select for our use case
+```{r}
+ggplot(all.metrics) +
+  aes(x=.metric, y=.estimate, fill=Model) +
+  geom_col(position='dodge') +
+  scale_fill_brewer(palette = 'Dark2') +
+  xlab("Metric Name") + 
+  ylab("Metric Estimate") +
+  ggtitle("Model Metric Value Comparison") +
+  theme_minimal()
+```
+## Test the data
+We will use our selected model to evaluate the test data.
+#### XGB: Re-evaluate against the validation data
+```{r}
+xgb.test.data = test.data %>%
+  bind_cols(predict(xgb.model, test.data)) %>%
+  glimpse()
+```
+
+#### XGB: Apply the metrics
+```{r}
+sba_metrics(xgb.test.data, truth=Outcome, estimate=.pred_class)
+```
+
+
+#### XGB: Confusion Matrix 
+```{r}
+# Confusion Matrix
+ 
+xgb.test.results = xgb.test.data %>%
+  select(Outcome, .pred_class)
+ 
+# Explicitly set the levels to make "Transported to Hospital" the positive class
+xgb.test.results$Outcome = factor(xgb.test.results$Outcome, 
+                                 levels = c("No Hospital Transport", "Transported to Hospital"))
+xgb.test.results$.pred_class = factor(xgb.test.results$.pred_class, 
+                                     levels = c("No Hospital Transport", "Transported to Hospital"))
+ 
+# Create confusion matrix with "Transported to Hospital" as positive class
+conf_mat = confusionMatrix(xgb.test.results$.pred_class, 
+                          xgb.test.results$Outcome,
+                          positive = "Transported to Hospital")
+print(conf_mat)
+```
+
+
