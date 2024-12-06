@@ -23,7 +23,7 @@ Problem: Motor vehicle crashes cause injuries and deaths that costs billions in 
 ## Preliminaries
 
 ### Load R packages:
-```{r}
+```{r echo=TRUE, results='hide'}
 library(tidyverse)
 library(ggplot2)
 library(dplyr)
@@ -174,6 +174,7 @@ person.data.na.filter
 
 
 Select the variables we want and use code-book (https://crashstats.nhtsa.dot.gov/Api/Public/ViewPublication/813545) to reduce categories to simplify data analysis:
+
 - Unique identifies for joins: CASENUM and PER_NO
 - Age of person involved: AGE_IM renamed to AGE_OF_PERSON
 - Sex of person involved: SEX_IMNAME renamed to SEX_OF_PERSON
@@ -295,7 +296,7 @@ accident.join.filtered = accident.join.set.pos.class %>%
          PERSON_EJECTED, ROLLOVER_OCCURENCE, FIRE_RELATED_CRASH, region_name, 
          urbancity_name, hour, month_name, light_condition, weather_name, Outcome)
 
-accident.join.filtered
+print(accident.join.filtered,n=Inf)
 ```
 
 Ensuring the positive class is set to "Transported to Hospital"
@@ -333,8 +334,11 @@ ggplot(train.data) +
 prop.table(table(train.data$Outcome))
 ```
 
-## Oversample Transported to Hospital to reduce class and Undersample Not Transported to address class imbalances in training data
+## Resample training data
+
 Due to severe class imbalance, we decided to resample the training data to ensure fewer false negatives.
+We will oversample Transported to Hospital to reduce class and undersample Not Transported to address class imbalances in training data.
+
 ```{r}
 train.balanced = ovun.sample(Outcome ~ ., data=train.data, method="both")$data
 
@@ -385,8 +389,7 @@ rf.model = rand_forest(mode="classification") %>%
 
 ```{r}
 rf.valid.data = na.omit(valid.data) %>%
-  bind_cols(predict(rf.model, na.omit(valid.data))) %>%
-  glimpse()
+  bind_cols(predict(rf.model, na.omit(valid.data)))
 ```
 
 #### RF: Apply the metrics:
@@ -405,8 +408,7 @@ xgb.model = boost_tree(mode="classification") %>%
 
 ```{r}
 xgb.valid.data = valid.data %>%
-  bind_cols(predict(xgb.model, valid.data)) %>%
-  glimpse()
+  bind_cols(predict(xgb.model, valid.data))
 ```
 
 #### XGB: Apply the metrics:
@@ -442,6 +444,7 @@ ggplot(tree_metrics %>% filter(.metric == "kap")) +
 ```
 
 Pick the number of trees with the highest Cohen's Kappa value.
+
 ```{r}
 rf.trees = tree_metrics %>% filter(.metric == "kap") %>%
   slice_max(.estimate, n=1) %>%
@@ -466,6 +469,7 @@ mtry_metrics = map_df(mtry_sizes, function(n) {
 
 
 Plot the different sizes against Cohen's Kappa:
+
 ```{r}
 ggplot(mtry_metrics %>% filter(.metric == "kap")) +
   aes(x=mtry, y=.estimate) +
@@ -475,6 +479,7 @@ ggplot(mtry_metrics %>% filter(.metric == "kap")) +
 ```
 
 Select the mtry value that produces the highest Cohen's Kappa:
+
 ```{r}
 rf.mtry = mtry_metrics %>% filter(.metric == "kap") %>%
   slice_max(.estimate, n=1) %>%
@@ -677,9 +682,13 @@ ggplot(all.metrics) +
   ggtitle("Model Metric Value Comparison") +
   theme_minimal()
 ```
+
 ## Test the data
+
 We will use our selected model to evaluate the test data.
+
 #### XGB: Re-evaluate against the validation data
+
 ```{r}
 xgb.test.data = test.data %>%
   bind_cols(predict(xgb.model, test.data)) %>%
@@ -690,6 +699,20 @@ xgb.test.data = test.data %>%
 ```{r}
 sba_metrics(xgb.test.data, truth=Outcome, estimate=.pred_class)
 ```
+
+#### Visualize feature importance
+This can be used to analyze which features have the highest correlation with the Outcome variable.
+```{r}
+# Extract the xgb.Booster object
+xgb_booster <- xgb.model$fit
+
+# Get feature importance
+feature_importance <- xgb.importance(model = xgb_booster)
+
+# Visualize feature importance
+xgb.plot.importance(importance_matrix = feature_importance)
+```
+
 
 
 #### XGB: Confusion Matrix 
@@ -711,5 +734,3 @@ conf_mat = confusionMatrix(xgb.test.results$.pred_class,
                           positive = "Transported to Hospital")
 print(conf_mat)
 ```
-
-
