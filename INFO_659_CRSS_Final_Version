@@ -296,7 +296,7 @@ accident.join.filtered = accident.join.set.pos.class %>%
          PERSON_EJECTED, ROLLOVER_OCCURENCE, FIRE_RELATED_CRASH, region_name, 
          urbancity_name, hour, month_name, light_condition, weather_name, Outcome)
 
-print(accident.join.filtered,n=Inf)
+print(accident.join.filtered)
 ```
 
 Ensuring the positive class is set to "Transported to Hospital"
@@ -377,7 +377,7 @@ nrow(train.balanced)
 ## Train the data
 We selected 2 decision tree models: Random Forest (RF) and Gradient-boosted (XGB) to train the data and compare the metrics.
 
-### 1. Random Forest (RF)
+### Random Forest (RF)
 
 #### RF: Fit the model to the train data
 ```{r}
